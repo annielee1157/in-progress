@@ -8,7 +8,7 @@ import argparse
 import segmentation_models_pytorch as smp
 import ssl
 from contrail import ContrailModel
-from image_dataset import ImageDataset, visualize
+from image_dataset import ImageDataset, visualize, visualize_color
 from loss import DiceLoss, FocalLoss
 ssl._create_default_https_context=ssl._create_unverified_context
 
@@ -120,20 +120,28 @@ def main(image_path, mask_path):
     # visualize(y_hat=y_hat, y=val_mask)
 
 
+    
+
+    # Color compare_image with the custom colormap, 0: True Positive, 1: True Negative, 2: False Positive, 3: False Negative
+    
     compare_image = np.zeros_like(val_mask)
 
     for i in range(y_hat.shape[0]):
         for j in range(y_hat.shape[1]):
             if val_mask[0, i, j] == 1 and y_hat[i, j] >= 0.5:  # True Positive
-                compare_image[0, i, j] = int("CCFF00",16) 
+                compare_image[0, i, j] = 0
             elif val_mask[0, i, j] == 0 and y_hat[i, j] < 0.5:  # True Negative
-                compare_image[0, i, j] = int("FFFFFF",16) 
+                compare_image[0, i, j] = 1
             elif val_mask[0, i, j] == 0 and y_hat[i, j] >= 0.5:  # False Positive
-                compare_image[0, i, j] = int("F4BBFF",16) 
+                compare_image[0, i, j] = 2
             elif val_mask[0, i, j] == 1 and y_hat[i, j] < 0.5:  # False Negative
-                compare_image[0, i, j] = int("9BDDFF",16)
+                compare_image[0, i, j] = 3
+                
+    # Does not use custom colors
+    # visualize(y_hat=y_hat, y=val_mask)
 
-    visualize(y_hat=y_hat, compare_image=compare_image, y=val_mask)
+    # Uses custom colors
+    visualize_color(compare_image=compare_image)
 
     return y_hat
 
