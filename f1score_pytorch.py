@@ -2,8 +2,15 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+from lightning import LightningDataModule, Trainer
 from sklearn.metrics import f1_score
 import argparse
+import segmentation_models_pytorch as smp
+import ssl
+from contrail import ContrailModel
+from image_dataset import ImageDataset, visualize
+from loss import DiceLoss, FocalLoss
+ssl._create_default_https_context=ssl._create_unverified_context
 
 _T11_BOUNDS = (243, 303)
 _CLOUD_TOP_TDIFF_BOUNDS = (-4, 5)
@@ -68,50 +75,74 @@ def false_color_image(brightness_temperatures):
     return np.clip(np.stack([r, g, b], axis=-1), 0, 1)
 
 
-def main(record_number):
-    BACKBONE = 'resnet34'
-
-    # custom_objects = {
-    #     'binary_focal_crossentropy': tf.keras.losses.BinaryFocalCrossentropy(
-    #         apply_class_balancing=True, alpha=0.9, gamma=2.0, from_logits=False),
-    #     'iou_score': sm.metrics.iou_score
-    # }
+def main(image_path, mask_path):
+    # BACKBONE = 'resnet152'
 
     # Load pre-trained model with torch
-    model = torch.load("bestmodel4.pth")  # Does the model need to be updated for PyTorch?
-    
-    dataset_dir = "/test_dataset" # Update the dataset directory
-    val_images, val_masks = [], []
 
-    # TODO: 
-    # for num in range(record_number):
-    #     path = f"{dataset_dir}/validation.tfrecords-{num:05}-of-00100"
-    #     dataset_val = tf.data.TFRecordDataset(path).map(parse_example)
-        
-    #     for feature in dataset_val.as_numpy_iterator():
-    #         if np.any(feature['human_pixel_masks'] == 1):
-    #             n_times_before = feature['n_times_before']
-    #             val_images.append(false_color_image(feature)[..., n_times_before, :])
-    #             val_masks.append(tf.squeeze(feature['human_pixel_masks'], axis=-1))
+    # loaded_model = smp.create_model(arch="Unet", encoder_name="resnet152", in_channels=3, classes=1)
+    # model.load_state_dict(torch.load("models/contrailsonly.torch.states.0.1.ResNet152.Dice.bin"), strict=False)
+    # model.eval()
 
-    val_images = torch.tensor(val_images)
-    val_masks = torch.tensor(val_masks)
+    loss = DiceLoss(log_loss=True)
+    # weights = torch.load("models/contrailsonly.torch.states.0.1.ResNet152.Dice.bin", weights_only=True) # added line
+    model = ContrailModel(
+            arch="Unet",
+            encoder="resnet152",
+            # pretrained = weights, # added line
+            pretrained="imagenet",
+            in_channels=3,
+            classes=1,
+            loss_function=loss,
+            learning_rate=0.001,
+        )
+
+    model.load_state_dict(torch.load("models/contrailsonly.torch.states.0.1.ResNet152.Dice.bin"), strict=False)
+
+    val_image = np.load(image_path).transpose(2, 0, 1).astype(np.float32) 
+    val_mask = np.load(mask_path)
+    # val_mask = val_mask / val_mask.max() # normalizing mask
+    val_mask = val_mask[..., np.newaxis].transpose(2, 0, 1) # 1, 256, 256
+    print(f"image[{val_image.ndim}]: {val_image.shape}, mask[{val_mask.ndim}]: {val_mask.shape}")
+
+    val_image = val_image[..., np.newaxis].transpose(3, 0, 1, 2)
+    print(f"image_dim[{val_image.ndim}]: {val_image.shape}, mask_dim[{val_mask.ndim}]: {val_mask.shape}")
     
-    # Set model to eval mode
+    
+    val_image = torch.from_numpy(val_image)
+    
     model.eval()
+    with torch.inference_mode(): 
+        y_hat = model(val_image).sigmoid().squeeze()
+        print(f"[{y_hat.ndim}]: {y_hat.shape}")
 
-    # review https://stackoverflow.com/questions/73396203/how-to-use-trained-pytorch-model-for-prediction
-    with torch.no_grad():
-        predicted_masks_val = (model(val_images) > 0.5).int()
+    # at this point y_hat has shape: torch.Size([256, 256]), and val_mask has shape:(1, 256, 256)
+    # visualize(y_hat=y_hat, y=val_mask)
 
-    # .flatten is numpy, so no need to change
-    f1_scores = [f1_score(true_mask.flatten().cpu().numpy(), pred_mask.flatten().cpu().numpy(), average='binary')
-                 for true_mask, pred_mask in zip(val_masks, predicted_masks_val)]
-    
-    return np.mean(f1_scores)
+
+    compare_image = np.zeros_like(val_mask)
+
+    for i in range(y_hat.shape[0]):
+        for j in range(y_hat.shape[1]):
+            if val_mask[0, i, j] == 1 and y_hat[i, j] >= 0.5:  # True Positive
+                compare_image[0, i, j] = int("CCFF00",16) 
+            elif val_mask[0, i, j] == 0 and y_hat[i, j] < 0.5:  # True Negative
+                compare_image[0, i, j] = int("FFFFFF",16) 
+            elif val_mask[0, i, j] == 0 and y_hat[i, j] >= 0.5:  # False Positive
+                compare_image[0, i, j] = int("F4BBFF",16) 
+            elif val_mask[0, i, j] == 1 and y_hat[i, j] < 0.5:  # False Negative
+                compare_image[0, i, j] = int("9BDDFF",16)
+
+    visualize(y_hat=y_hat, compare_image=compare_image, y=val_mask)
+
+    return y_hat
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("record_number", type=int, help="Number of validation datasets to process")
+    parser.add_argument("--image", dest="image_path", type=str, help="Path to image", required=False, default="test_dataset/singleframeimage/image-val-ts1557132000-n00011.npy")
+    parser.add_argument("--mask", dest="mask_path", type=str, help="Path to image", required=False, default="test_dataset/mask/mask-val-ts1557132000-n00011.npy")
     args = parser.parse_args()
-    print(main(args.record_number))
+    # print(main(args.image_path))
+    # print(args.image_path, args.mask_path)
+    print(main(args.image_path, args.mask_path))
